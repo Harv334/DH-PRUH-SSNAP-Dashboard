@@ -72,11 +72,33 @@ f["MetricLabel"] = f.apply(
 
 if q:
     qlow = q.lower()
+    # IMPORTANT: regex=False so literal search works with dots like "1.1"
     f = f[f["MetricLabel"].str.lower().str.contains(qlow, regex=False)]
 
-# ---------- Metric selection ----------
+# ---------- Metric selection (sorted numerically) ----------
+# Build label -> metric map
 metric_map = dict(zip(f["MetricLabel"], f["Metric"]))
-labels_sorted = sorted(metric_map.keys())
+
+def metric_sort_key(metric_str: str):
+    """
+    Extract a sort key from strings like:
+      '1.1', '1.1A', '2.3B', '10.2', '3.4.1', '3.4.1A', etc.
+    Returns (major, minor, sub, letter_rank, fallback_str)
+    """
+    s = (metric_str or "").strip()
+    m = re.match(r"^\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?\s*([A-Za-z]?)", s)
+    if not m:
+        # Put non-matching metrics at the end, sorted by name
+        return (10**9, 10**9, 10**9, 10**9, s.lower())
+    major = int(m.group(1)) if m.group(1) else 0
+    minor = int(m.group(2)) if m.group(2) else 0
+    sub   = int(m.group(3)) if m.group(3) else 0
+    letter = m.group(4).upper() if m.group(4) else ""
+    letter_rank = (ord(letter) - 64) if letter else 0  # A=1, B=2...
+    return (major, minor, sub, letter_rank, s.lower())
+
+# Sort labels by their underlying metric code
+labels_sorted = sorted(metric_map.keys(), key=lambda lab: metric_sort_key(metric_map[lab]))
 if not labels_sorted:
     st.warning("No rows match your filters/search.")
     st.stop()
@@ -127,8 +149,7 @@ def site_color_scale(sites_in_plot):
     pinks = ["#e377c2", "#ff6fb5", "#d45087", "#fb9a99", "#f781bf"]
     greys = ["#7f7f7f", "#aaaaaa", "#555555"]
 
-    domain = []
-    colors = []
+    domain, colors = [], []
     bi = pi = gi = 0
     for s in sites_in_plot:
         sl = str(s).lower()
@@ -242,7 +263,6 @@ st.download_button(
     file_name="key_indicators_filtered_table.csv",
     mime="text/csv"
 )
-
 st.download_button(
     "Download chart data (CSV)",
     long.to_csv(index=False).encode("utf-8"),
@@ -269,6 +289,7 @@ if ALT_SAVE_AVAILABLE:
             )
 else:
     st.info("To enable PNG downloads, install:\n    pip install altair_saver vl-convert-python")
+
 
 
 
