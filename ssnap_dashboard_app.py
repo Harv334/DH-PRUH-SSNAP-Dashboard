@@ -16,7 +16,7 @@ except Exception:
 st.set_page_config(page_title="SSNAP – Key Indicators (multi-site workbook)", layout="wide")
 st.title("SSNAP Key indicators, PRUH & DH HASU/SU")
 
-# ---- Data loading (cached, no upload) ----
+# ---------- Data loading (cached, no upload) ----------
 DEFAULT_XLSX = Path("Key indicators DH-PRUH.xlsx")
 
 @st.cache_data(show_spinner=False)
@@ -31,22 +31,18 @@ def read_all_sheets_cached(pathlike: Path) -> pd.DataFrame:
         df_sh["Site"] = sh  # derive Site from sheet name
         frames.append(df_sh)
     df = pd.concat(frames, ignore_index=True)
-    # normalize columns
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
 try:
     df = read_all_sheets_cached(DEFAULT_XLSX)
-except FileNotFoundError as e:
-    st.error(str(e) + "\n\nPlace the workbook in the same folder as this script.")
-    st.stop()
 except Exception as e:
     st.error(f"Failed to load workbook: {e}")
     st.stop()
 
-# ---- Validate ----
+# ---------- Validate ----------
 required_cols = {"Metric", "Item Description", "Site"}
-if not required_cols.issubset(set(df.columns)):
+if not required_cols.issubset(df.columns):
     missing = required_cols - set(df.columns)
     st.error(f"Expected columns missing: {', '.join(sorted(missing))}")
     st.stop()
@@ -58,7 +54,7 @@ if not year_cols:
     st.error("No financial year columns found (e.g., 2019/20).")
     st.stop()
 
-# ---- Sidebar filters ----
+# ---------- Sidebar filters ----------
 with st.sidebar:
     st.header("Filters")
     sites = sorted(df["Site"].dropna().unique())
@@ -76,9 +72,9 @@ f["MetricLabel"] = f.apply(
 
 if q:
     qlow = q.lower()
-    f = f[f["MetricLabel"].str.lower().str.contains(qlow)]
+    f = f[f["MetricLabel"].str.lower().str_contains(qlow, regex=False)]
 
-# ---- Metric selection ----
+# ---------- Metric selection ----------
 metric_map = dict(zip(f["MetricLabel"], f["Metric"]))
 labels_sorted = sorted(metric_map.keys())
 if not labels_sorted:
@@ -95,7 +91,7 @@ table_cols = ["Metric", "Item Description", "Site"] + display_years
 st.subheader("Filtered table")
 st.dataframe(mf[table_cols].reset_index(drop=True), use_container_width=True, height=350)
 
-# ---- Long format for chart ----
+# ---------- Long format for chart ----------
 def parse_value_to_minutes_or_number(v):
     """Return minutes since midnight if HH:MM(/:SS), else numeric."""
     if pd.isna(v):
@@ -125,12 +121,40 @@ long["Year"] = pd.Categorical(long["Year"], categories=year_cols, ordered=True)
 # Detect time-of-day style (HH:MM/HH:MM:SS)
 is_timeofday = long["Raw"].dropna().astype(str).str.match(r"^\d{1,2}:\d{2}(:\d{2})?$").all()
 
-# Helper: dynamic minute ticks for zoomed/default ranges
+# ---------- Colour mapping (DH → blues, PRUH → pinks, others → greys) ----------
+def site_color_scale(sites_in_plot):
+    blues = ["#1f77b4", "#2a9df4", "#1b6ca8", "#74add1", "#a6cee3"]
+    pinks = ["#e377c2", "#ff6fb5", "#d45087", "#fb9a99", "#f781bf"]
+    greys = ["#7f7f7f", "#aaaaaa", "#555555"]
+
+    domain = []
+    colors = []
+    bi = pi = gi = 0
+    for s in sites_in_plot:
+        sl = str(s).lower()
+        if "pruh" in sl:
+            domain.append(s); colors.append(pinks[pi % len(pinks)]); pi += 1
+        elif sl.startswith("dh") or " dh" in sl or "dh " in sl:
+            domain.append(s); colors.append(blues[bi % len(blues)]); bi += 1
+        else:
+            domain.append(s); colors.append(greys[gi % len(greys)]); gi += 1
+    return domain, colors
+
+sites_in_plot = list(pd.unique(long["Site"]))
+sites_in_plot.sort()
+color_domain, color_range = site_color_scale(sites_in_plot)
+color_enc = alt.Color(
+    "Site:N",
+    legend=alt.Legend(title="Site"),
+    scale=alt.Scale(domain=color_domain, range=color_range)
+)
+
+# ---------- Helpers ----------
 def minute_ticks(ymin, ymax, max_ticks=8):
     if ymin is None or ymax is None:
         return [0, 360, 720, 1080, 1440]
     span = max(1, ymax - ymin)
-    for step in [30, 60, 120, 180, 240, 360]:  # minutes
+    for step in [30, 60, 120, 180, 240, 360]:
         if span / step <= max_ticks:
             break
     start = int(np.floor(ymin / step) * step)
@@ -139,7 +163,7 @@ def minute_ticks(ymin, ymax, max_ticks=8):
     vals = [v for v in vals if 0 <= v <= 1440]
     return vals or [int(ymin), int(ymax)]
 
-# ---- Chart ----
+# ---------- Chart ----------
 st.subheader("Trend chart")
 
 # Zoom controls
@@ -179,23 +203,22 @@ if is_timeofday:
         .encode(
             x=alt.X("Year:N", sort=year_cols, title="Year"),
             y=alt.Y("Value:Q", scale=y_scale, axis=y_axis),
-            color=alt.Color("Site:N", legend=alt.Legend(title="Site")),
+            color=color_enc,
             tooltip=["Metric", "Item Description", "Site", "Year", "Raw"]
         )
         .properties(height=450)
     )
 else:
     # Default non-time axis: Percentage
-    y_title = "Percentage"
     y_scale = alt.Scale(domain=[y_min, y_max]) if (y_min is not None and y_max is not None) else alt.Undefined
-    y_axis = alt.Axis(orient="left", title=y_title, grid=True)
+    y_axis = alt.Axis(orient="left", title="Percentage", grid=True)
     line = (
         alt.Chart(long.dropna(subset=["Value"]))
         .mark_line(point=True)
         .encode(
             x=alt.X("Year:N", sort=year_cols, title="Year"),
             y=alt.Y("Value:Q", scale=y_scale, axis=y_axis),
-            color=alt.Color("Site:N", legend=alt.Legend(title="Site")),
+            color=color_enc,
             tooltip=["Metric", "Item Description", "Site", "Year", "Raw", "Value"]
         )
         .properties(height=450)
@@ -203,7 +226,7 @@ else:
 
 st.altair_chart(line, use_container_width=True)
 
-# ---- Downloads ----
+# ---------- Downloads ----------
 st.download_button(
     "Download filtered table (CSV)",
     mf[table_cols].to_csv(index=False).encode("utf-8"),
@@ -218,7 +241,7 @@ st.download_button(
     mime="text/csv"
 )
 
-# ---- Chart PNG export with fallback ----
+# ---------- Chart PNG export with fallback ----------
 if ALT_SAVE_AVAILABLE:
     try:
         buf = io.BytesIO()
@@ -237,4 +260,5 @@ if ALT_SAVE_AVAILABLE:
             )
 else:
     st.info("To enable PNG downloads, install:\n    pip install altair_saver vl-convert-python")
+
 
