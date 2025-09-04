@@ -72,7 +72,7 @@ f["MetricLabel"] = f.apply(
 
 if q:
     qlow = q.lower()
-    f = f[f["MetricLabel"].str.lower().str_contains(qlow, regex=False)]
+    f = f[f["MetricLabel"].str.lower().str.contains(qlow, regex=False)]
 
 # ---------- Metric selection ----------
 metric_map = dict(zip(f["MetricLabel"], f["Metric"]))
@@ -165,6 +165,15 @@ def minute_ticks(ymin, ymax, max_ticks=8):
 
 # ---------- Chart ----------
 st.subheader("Trend chart")
+
+# Show item description above the chart
+desc_candidates = (
+    mf["Item Description"].dropna().astype(str).str.strip().unique().tolist()
+    if "Item Description" in mf.columns else []
+)
+item_desc = next((d for d in desc_candidates if d), "")
+if item_desc:
+    st.markdown(f"**Item description:** {item_desc}")
 
 # Zoom controls
 y_min, y_max = None, None
@@ -260,5 +269,6 @@ if ALT_SAVE_AVAILABLE:
             )
 else:
     st.info("To enable PNG downloads, install:\n    pip install altair_saver vl-convert-python")
+
 
 
