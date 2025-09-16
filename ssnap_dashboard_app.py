@@ -1,17 +1,9 @@
 import re
-import io
 import numpy as np
 import pandas as pd
 import streamlit as st
 from pathlib import Path
 import altair as alt
-
-# Optional: PNG export
-try:
-    from altair_saver import save as altair_save
-    ALT_SAVE_AVAILABLE = True
-except Exception:
-    ALT_SAVE_AVAILABLE = False
 
 st.set_page_config(page_title="SSNAP – Key Indicators (multi-site workbook)", layout="wide")
 st.title("SSNAP Key indicators, PRUH & DH HASU/SU")
@@ -54,7 +46,7 @@ if not year_cols:
     st.error("No financial year columns found (e.g., 2019/20).")
     st.stop()
 
-# ---------- NEW: Detect/derive metric type (Patient-centred vs Team-centred) ----------
+# ---------- Metric type (Patient-centred vs Team-centred) ----------
 def _find_type_column(cols):
     """Try to find a column that encodes metric type."""
     patterns = [
@@ -97,21 +89,16 @@ def _normalise_type_value(v):
 
 def _classify_by_keywords(text):
     t = str(text or "").lower()
-    # If clearly team and not obviously patient
     if any(k in t for k in _team_kw) and not any(k in t for k in _patient_kw):
         return "Team-centred"
-    # If clearly patient and not obviously team
     if any(k in t for k in _patient_kw) and not any(k in t for k in _team_kw):
         return "Patient-centred"
-    # Heuristic fallback: favour patient-centred as default for ambiguous KPI text
     return "Patient-centred"
 
 def derive_metric_type(frame: pd.DataFrame) -> pd.Series:
     if TYPE_COL:
-        # Use the discovered column if it contains recognisable values
         vals = frame[TYPE_COL].apply(_normalise_type_value)
         if vals.notna().any():
-            # If some are NA, fill with heuristic
             base = vals.copy()
             mask_na = base.isna()
             if mask_na.any():
@@ -119,7 +106,6 @@ def derive_metric_type(frame: pd.DataFrame) -> pd.Series:
                         frame["Metric"].fillna("").astype(str))
                 base[mask_na] = text[mask_na].apply(_classify_by_keywords)
             return base
-    # No usable column found → keyword heuristic on description + metric code
     text = (frame["Item Description"].fillna("").astype(str) + " | " +
             frame["Metric"].fillna("").astype(str))
     return text.apply(_classify_by_keywords)
@@ -130,7 +116,6 @@ df["MetricType"] = derive_metric_type(df)
 with st.sidebar:
     st.header("Filters")
 
-    # NEW: Metric set selector
     metric_set = st.radio(
         "Metric set",
         options=["All", "Patient-centred", "Team-centred"],
@@ -148,7 +133,6 @@ f = df.copy()
 if selected_sites:
     f = f[f["Site"].isin(selected_sites)]
 
-# Apply metric-set filter
 if metric_set != "All":
     f = f[f["MetricType"] == metric_set]
 
@@ -160,32 +144,23 @@ f["MetricLabel"] = f.apply(
 
 if q:
     qlow = q.lower()
-    # IMPORTANT: regex=False so literal search works with dots like "1.1"
     f = f[f["MetricLabel"].str.lower().str.contains(qlow, regex=False)]
 
 # ---------- Metric selection (sorted numerically) ----------
-# Build label -> metric map
 metric_map = dict(zip(f["MetricLabel"], f["Metric"]))
 
 def metric_sort_key(metric_str: str):
-    """
-    Extract a sort key from strings like:
-      '1.1', '1.1A', '2.3B', '10.2', '3.4.1', '3.4.1A', etc.
-    Returns (major, minor, sub, letter_rank, fallback_str)
-    """
     s = (metric_str or "").strip()
     m = re.match(r"^\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?\s*([A-Za-z]?)", s)
     if not m:
-        # Put non-matching metrics at the end, sorted by name
         return (10**9, 10**9, 10**9, 10**9, s.lower())
     major = int(m.group(1)) if m.group(1) else 0
     minor = int(m.group(2)) if m.group(2) else 0
     sub   = int(m.group(3)) if m.group(3) else 0
     letter = m.group(4).upper() if m.group(4) else ""
-    letter_rank = (ord(letter) - 64) if letter else 0  # A=1, B=2...
+    letter_rank = (ord(letter) - 64) if letter else 0
     return (major, minor, sub, letter_rank, s.lower())
 
-# Sort labels by their underlying metric code
 labels_sorted = sorted(metric_map.keys(), key=lambda lab: metric_sort_key(metric_map[lab]))
 if not labels_sorted:
     st.warning("No rows match your filters/search.")
@@ -196,7 +171,7 @@ selected_metric = metric_map[selected_label]
 mf = f[f["Metric"] == selected_metric].copy()
 
 display_years = selected_years if selected_years else year_cols
-table_cols = ["MetricType", "Metric", "Item Description", "Site"] + display_years  # include MetricType in table
+table_cols = ["MetricType", "Metric", "Item Description", "Site"] + display_years
 
 st.subheader("Filtered table")
 st.dataframe(mf[table_cols].reset_index(drop=True), use_container_width=True, height=350)
@@ -228,10 +203,10 @@ long = mf.melt(
 long["Value"] = long["Raw"].apply(parse_value_to_minutes_or_number)
 long["Year"] = pd.Categorical(long["Year"], categories=year_cols, ordered=True)
 
-# Detect time-of-day style (HH:MM/HH:MM:SS)
+# Detect time-of-day style
 is_timeofday = long["Raw"].dropna().astype(str).str.match(r"^\d{1,2}:\d{2}(:\d{2})?$").all()
 
-# ---------- Colour mapping (DH → blues, PRUH → pinks, others → greys) ----------
+# ---------- Colour mapping ----------
 def site_color_scale(sites_in_plot):
     blues = ["#1f77b4", "#2a9df4", "#1b6ca8", "#74add1", "#a6cee3"]
     pinks = ["#e377c2", "#ff6fb5", "#d45087", "#fb9a99", "#f781bf"]
@@ -275,7 +250,6 @@ def minute_ticks(ymin, ymax, max_ticks=8):
 # ---------- Chart ----------
 st.subheader("Trend chart")
 
-# Show item description above the chart
 desc_candidates = (
     mf["Item Description"].dropna().astype(str).str.strip().unique().tolist()
     if "Item Description" in mf.columns else []
@@ -298,7 +272,6 @@ if st.checkbox("Zoom Y-axis"):
         y_max = st.number_input("Y-axis max", value=default_max, step=1.0)
 
 if is_timeofday:
-    # Default domain: 00:00 to (max + 1 hour), capped at 24:00, unless user zooms
     valid_vals = long["Value"].dropna()
     if y_min is None or y_max is None:
         max_val = float(valid_vals.max()) if not valid_vals.empty else 0.0
@@ -328,7 +301,6 @@ if is_timeofday:
         .properties(height=450)
     )
 else:
-    # Default non-time axis: Percentage
     y_scale = alt.Scale(domain=[y_min, y_max]) if (y_min is not None and y_max is not None) else alt.Undefined
     y_axis = alt.Axis(orient="left", title="Percentage", grid=True)
     line = (
@@ -359,25 +331,6 @@ st.download_button(
     mime="text/csv"
 )
 
-# ---------- Chart PNG export with fallback ----------
-if ALT_SAVE_AVAILABLE:
-    try:
-        buf = io.BytesIO()
-        altair_save(line, fp=buf, fmt="png")  # auto backend
-        st.download_button("Download chart (PNG)", data=buf.getvalue(), file_name="chart.png", mime="image/png")
-    except Exception:
-        try:
-            buf = io.BytesIO()
-            altair_save(line, fp=buf, fmt="png", method="node")  # node fallback
-            st.download_button("Download chart (PNG)", data=buf.getvalue(), file_name="chart.png", mime="image/png")
-        except Exception as e2:
-            st.warning(
-                "PNG export failed. Please ensure the following are installed/updated:\n"
-                "  pip install -U altair_saver vl-convert-python\n\n"
-                f"Details: {e2}"
-            )
-else:
-    st.info("To enable PNG downloads, install:\n    pip install altair_saver vl-convert-python")
 
 
 
